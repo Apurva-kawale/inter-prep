@@ -1,0 +1,846 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>PySpark Interview Prep</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: linear-gradient(135deg,#0f0c29,#302b63,#24243e); min-height: 100vh; font-family: 'Segoe UI', system-ui, sans-serif; color: #e8e8f0; }
+  input::placeholder { color: rgba(255,255,255,0.35); }
+  input { color-scheme: dark; }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: rgba(255,255,255,0.05); }
+  ::-webkit-scrollbar-thumb { background: rgba(255,107,53,0.4); border-radius: 3px; }
+  pre { white-space: pre-wrap; word-break: break-all; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState } = React;
+
+const questions = [
+  {
+    id: 1, category: "Core Concepts", difficulty: "Medium",
+    question: "What is the difference between RDD, DataFrame, and Dataset in Spark?",
+    answer: `**RDD (Resilient Distributed Dataset):**
+- Low-level API, immutable distributed collection of objects
+- No schema enforcement, operates on JVM objects
+- Less optimized — no Catalyst optimizer
+- Use when: fine-grained control or unstructured data
+
+**DataFrame:**
+- Distributed collection organized into named columns (like a SQL table)
+- Schema-aware, uses Catalyst optimizer → faster than RDDs
+- Available in Python, Scala, Java, R
+- Use when: structured/semi-structured data (most common in PySpark)
+
+**Dataset:**
+- Type-safe version of DataFrame (compile-time type checking)
+- Only in Scala/Java — not available in Python
+- Combines RDD type safety + DataFrame optimizer
+
+**Key insight:** In PySpark you primarily use DataFrames. Datasets aren't available in Python due to dynamic typing. Always prefer DataFrames over RDDs unless you have a specific reason.`,
+    followUp: "When would you still choose RDD over DataFrame in a production pipeline?"
+  },
+  {
+    id: 2, category: "Core Concepts", difficulty: "Easy",
+    question: "Explain lazy evaluation in Spark. Why is it important?",
+    answer: `**Lazy Evaluation** means Spark does NOT execute transformations immediately. It builds a logical plan (DAG) and only executes when an **action** is called.
+
+**Transformations (lazy):** filter(), map(), select(), groupBy(), join()
+**Actions (trigger execution):** collect(), count(), show(), write(), take()
+
+**Why it matters:**
+1. **Optimization** — Catalyst can reorder, combine, or eliminate operations before running
+2. **Efficiency** — Avoids unnecessary computation
+3. **Fault tolerance** — DAG can be recomputed from lineage if a partition fails
+
+\`\`\`python
+df = spark.read.parquet("s3://data/events")
+df_filtered = df.filter(df.country == "IN")  # Nothing runs yet
+df_agg = df_filtered.groupBy("user_id").count()  # Still nothing
+df_agg.show()  # NOW Spark executes the full plan
+\`\`\`
+
+**Interview tip:** Mention that Spark may push filter predicates before joins (predicate pushdown) thanks to lazy evaluation + Catalyst.`,
+    followUp: "What's the difference between a narrow and wide transformation?"
+  },
+  {
+    id: 3, category: "Performance", difficulty: "Hard",
+    question: "What is data skew and how do you handle it in PySpark?",
+    answer: `**Data Skew** occurs when data is unevenly distributed across partitions — some partitions have much more data, causing a few tasks to take much longer (stragglers).
+
+**Symptoms:**
+- Most tasks complete in seconds, 1–2 tasks take minutes
+- Spark UI shows uneven task duration in a stage
+- OOM errors on specific executors
+
+**Solutions:**
+
+**1. Salting (most common):**
+\`\`\`python
+df_salted = df.withColumn("salt", (rand() * 10).cast("int"))
+df_salted = df_salted.withColumn("salted_key",
+    concat(col("user_id"), lit("_"), col("salt")))
+\`\`\`
+
+**2. Broadcast Join:**
+\`\`\`python
+from pyspark.sql.functions import broadcast
+result = large_df.join(broadcast(small_df), "key")
+\`\`\`
+
+**3. AQE Skew Handling (Spark 3.0+):**
+\`\`\`python
+spark.conf.set("spark.sql.adaptive.enabled", "true")
+spark.conf.set("spark.sql.adaptive.skewJoin.enabled", "true")
+\`\`\`
+
+**4. Repartition on composite key:**
+\`\`\`python
+df.repartition(200, "country", "date")
+\`\`\`
+
+**Interview tip:** Always mention Adaptive Query Execution (AQE) in Spark 3.x — it handles skew automatically at runtime.`,
+    followUp: "How does Adaptive Query Execution (AQE) in Spark 3.x help with skew?"
+  },
+  {
+    id: 4, category: "Performance", difficulty: "Hard",
+    question: "Explain the difference between repartition() and coalesce(). When do you use each?",
+    answer: `**repartition(n):**
+- Full shuffle — redistributes data across ALL partitions
+- Can increase OR decrease partition count
+- Results in evenly distributed partitions
+- Expensive (network I/O)
+- Use when: increasing partitions, or need balance before heavy operation
+
+**coalesce(n):**
+- No full shuffle — merges existing partitions (narrow transformation)
+- Can ONLY decrease partition count
+- May result in uneven partitions
+- Much cheaper than repartition
+- Use when: reducing partitions before writing to avoid many small files
+
+\`\`\`python
+# Before a heavy join — use repartition for balance
+df = df.repartition(200, "join_key")
+
+# Before writing to storage — use coalesce to reduce files
+df.coalesce(10).write.parquet("s3://output/")
+\`\`\`
+
+**Gotcha:** coalesce can push upstream transformations into fewer partitions even before writing, reducing parallelism. If you need to maintain parallelism, repartition is safer.`,
+    followUp: "What is the 'small files problem' and how does coalesce help?"
+  },
+  {
+    id: 5, category: "Performance", difficulty: "Medium",
+    question: "What is caching/persistence in Spark? What storage levels exist?",
+    answer: `**Caching** stores intermediate results in memory (or disk) so they don't get recomputed when reused.
+
+**When to use:**
+- DataFrame used multiple times in your code
+- Iterative algorithms (ML training)
+- After expensive operations (joins, aggregations)
+
+\`\`\`python
+df.cache()           # Shorthand for MEMORY_AND_DISK
+df.persist()         # Default: MEMORY_AND_DISK
+df.persist(StorageLevel.MEMORY_ONLY)
+df.unpersist()       # Always unpersist when done!
+\`\`\`
+
+**Storage Levels:**
+- MEMORY_ONLY — stores in memory, recomputes if evicted
+- MEMORY_AND_DISK — spills to disk if memory is full (recommended)
+- MEMORY_ONLY_SER — serialized in memory (smaller footprint)
+- DISK_ONLY — only on disk
+- MEMORY_AND_DISK_2 — replicated to 2 nodes
+
+**Best practices:**
+- Use MEMORY_AND_DISK (default) for production — safe fallback to disk
+- **Always unpersist()** when done — prevents memory leaks
+- Don't cache DataFrames you only use once`,
+    followUp: "How do you decide whether to cache a DataFrame or not?"
+  },
+  {
+    id: 6, category: "Joins", difficulty: "Hard",
+    question: "Explain the different join strategies in Spark (Broadcast, Sort-Merge, Shuffle Hash).",
+    answer: `**1. Broadcast Hash Join (BHJ):**
+- Broadcasts the smaller table to ALL executors
+- No shuffle of the large table — fastest strategy
+- Threshold: spark.sql.autoBroadcastJoinThreshold (default 10MB)
+\`\`\`python
+result = large_df.join(broadcast(small_df), "id")
+\`\`\`
+
+**2. Sort-Merge Join (SMJ):**
+- Default for large-large joins
+- Both tables shuffled by join key, sorted, then merged
+- Memory efficient, handles large datasets, requires sortable keys
+\`\`\`python
+spark.conf.set("spark.sql.join.preferSortMergeJoin", "true")
+\`\`\`
+
+**3. Shuffle Hash Join (SHJ):**
+- Shuffles both tables by join key, builds hash table from smaller side
+- Doesn't require sorting, more memory intensive than SMJ
+
+**You can force a strategy with hints:**
+\`\`\`python
+df1.hint("broadcast").join(df2, "key")
+df1.hint("merge").join(df2, "key")
+df1.hint("shuffle_hash").join(df2, "key")
+\`\`\`
+
+**Interview tip:** Check the query plan with df.explain() to verify which join strategy Spark chose.`,
+    followUp: "What happens when you broadcast a table that's too large for executor memory?"
+  },
+  {
+    id: 7, category: "Architecture", difficulty: "Medium",
+    question: "Explain Spark's execution model: Driver, Executors, Tasks, Stages, and Jobs.",
+    answer: `**Hierarchy: Job → Stages → Tasks**
+
+**Driver:**
+- Main process running your PySpark application
+- Creates SparkContext/SparkSession, builds the DAG
+- Schedules tasks to executors
+- Single point of failure — keep it lightweight
+
+**Executor:**
+- JVM processes on worker nodes
+- Execute tasks, store cached data
+- Report results back to driver
+- Each executor has multiple cores (task slots)
+
+**Job:** Triggered by each action (count(), show(), write())
+
+**Stage:** Set of tasks that run without a shuffle. Stage boundary = shuffle boundary.
+
+**Task:** Smallest unit of execution. One task per partition, runs on one executor core.
+
+**Example flow:**
+\`\`\`
+df.groupBy("country").count().show()
+  → Job created
+  → Stage 1: Read + partial aggregation (map-side)
+  → [SHUFFLE]
+  → Stage 2: Final aggregation + show (reduce-side)
+\`\`\`
+
+**Interview tip:** "Wide transformations (groupBy, join, distinct) cause stage boundaries because they require shuffles across executors."`,
+    followUp: "How do you tune the number of shuffle partitions?"
+  },
+  {
+    id: 8, category: "Architecture", difficulty: "Medium",
+    question: "What is a shuffle in Spark and why is it expensive?",
+    answer: `**Shuffle** is the process of redistributing data across partitions/executors — triggered by wide transformations like groupBy, join, distinct, repartition.
+
+**Why it's expensive:**
+1. **Disk I/O** — shuffle data is written to disk before being transferred
+2. **Network I/O** — data moves across the network between executors
+3. **Serialization/Deserialization** — data must be serialized to transfer
+4. **GC pressure** — large objects in memory
+
+**Key config:**
+\`\`\`python
+# Default 200 — often needs tuning
+spark.conf.set("spark.sql.shuffle.partitions", "400")
+# Rule of thumb: target ~128MB–200MB per partition
+# partitions = total_data_size / target_partition_size
+\`\`\`
+
+**How to minimize shuffles:**
+- Use broadcast joins to avoid shuffling large tables
+- Filter/project data BEFORE joining
+- Partition source data on join keys
+- Enable AQE to dynamically tune shuffle partitions
+
+**Interview tip:** "One of the most common issues I debug is shuffle spill — when shuffle data exceeds memory and spills to disk. Tuning spark.sql.shuffle.partitions and executor memory is key."`,
+    followUp: "What is shuffle spill and how do you diagnose it in Spark UI?"
+  },
+  {
+    id: 9, category: "PySpark API", difficulty: "Medium",
+    question: "What are Window functions in PySpark? Give a practical example.",
+    answer: `**Window functions** perform calculations across a set of rows related to the current row — without collapsing rows (unlike aggregations).
+
+\`\`\`python
+from pyspark.sql import Window
+from pyspark.sql.functions import row_number, rank, dense_rank, lag, lead
+
+windowSpec = Window.partitionBy("department").orderBy(col("salary").desc())
+\`\`\`
+
+**Ranking functions:**
+\`\`\`python
+df.withColumn("rank", rank().over(windowSpec))
+df.withColumn("dense_rank", dense_rank().over(windowSpec))
+df.withColumn("row_num", row_number().over(windowSpec))
+\`\`\`
+
+**Running totals:**
+\`\`\`python
+w2 = Window.partitionBy("dept").orderBy("date").rowsBetween(Window.unboundedPreceding, 0)
+df.withColumn("running_total", sum("sales").over(w2))
+\`\`\`
+
+**Lead/Lag (time-series):**
+\`\`\`python
+df.withColumn("prev_sales", lag("sales", 1).over(windowSpec))
+df.withColumn("next_sales", lead("sales", 1).over(windowSpec))
+\`\`\`
+
+**Real use case — Top N per group:**
+\`\`\`python
+w = Window.partitionBy("department").orderBy(col("salary").desc())
+df.withColumn("rank", dense_rank().over(w)).filter(col("rank") <= 3)
+\`\`\`
+
+**Interview tip:** Window functions trigger a shuffle (partitionBy = shuffle). Be mindful of cardinality in partitionBy columns.`,
+    followUp: "What's the difference between rank(), dense_rank(), and row_number()?"
+  },
+  {
+    id: 10, category: "PySpark API", difficulty: "Medium",
+    question: "How do you handle NULL values in PySpark?",
+    answer: `**Checking for NULLs:**
+\`\`\`python
+df.filter(col("name").isNull())
+df.filter(col("name").isNotNull())
+# Count nulls per column:
+df.select([count(when(col(c).isNull(), c)).alias(c) for c in df.columns])
+\`\`\`
+
+**Dropping NULLs:**
+\`\`\`python
+df.dropna()                           # Drop rows with ANY null
+df.dropna(how="all")                  # Drop rows where ALL are null
+df.dropna(subset=["name", "email"])   # Specific columns
+df.dropna(thresh=3)                   # Keep rows with >= 3 non-null values
+\`\`\`
+
+**Filling NULLs:**
+\`\`\`python
+df.fillna(0)
+df.fillna({"age": 0, "name": "Unknown"})
+df.withColumn("revenue", coalesce(col("revenue"), lit(0)))
+\`\`\`
+
+**NULL-safe equality:**
+\`\`\`python
+# Regular == treats NULL != NULL
+df.filter(col("a").eqNullSafe(col("b")))  # NULL == NULL is True here
+\`\`\`
+
+**NULL in aggregations:**
+- sum(), avg(), count(col) — all IGNORE NULLs
+- count(*) counts all rows including NULLs
+
+**Interview tip:** Know how NULLs behave in joins — NULL keys don't match in inner joins but appear in outer joins with nullified columns.`,
+    followUp: "How does NULL propagate in expressions like col('a') + col('b') when one is NULL?"
+  },
+  {
+    id: 11, category: "Optimization", difficulty: "Hard",
+    question: "What is Predicate Pushdown and Partition Pruning in Spark?",
+    answer: `**Predicate Pushdown:**
+Spark pushes filter conditions as close to the data source as possible — reducing data read.
+
+\`\`\`python
+df = spark.read.parquet("s3://data/events")
+df.filter(col("country") == "IN").select("user_id", "event_type")
+# Spark pushes filter to Parquet reader → reads only matching row groups
+\`\`\`
+
+Works with: Parquet, ORC, Delta Lake, JDBC
+Verify with: df.explain() — look for PushedFilters
+
+**Partition Pruning:**
+When data is partitioned on disk (Hive-style), Spark skips irrelevant partitions entirely.
+
+\`\`\`
+s3://data/events/
+  ├── country=IN/
+  ├── country=US/
+  └── country=UK/
+\`\`\`
+
+\`\`\`python
+df.filter(col("country") == "IN")
+# Only reads s3://data/events/country=IN/ — skips everything else
+\`\`\`
+
+**Best practices:**
+- Partition on frequently filtered columns (date, country, region)
+- Don't over-partition — avoid high-cardinality columns like user_id
+- Use Parquet/ORC (columnar) for maximum pushdown benefit
+- Delta Lake Z-Ordering also helps with data skipping
+
+\`\`\`python
+df.write.partitionBy("country", "year").parquet("s3://output/")
+\`\`\``,
+    followUp: "How would you choose partition columns for a large event log table?"
+  },
+  {
+    id: 12, category: "Optimization", difficulty: "Medium",
+    question: "What are UDFs in PySpark and what are their performance implications?",
+    answer: `**UDF (User Defined Function):** Custom Python functions for use in DataFrame operations.
+
+\`\`\`python
+from pyspark.sql.functions import udf
+from pyspark.sql.types import StringType
+
+def clean_email(email):
+    return email.strip().lower() if email else None
+
+clean_email_udf = udf(clean_email, StringType())
+df.withColumn("clean_email", clean_email_udf(col("email")))
+\`\`\`
+
+**Why UDFs are slow:**
+1. **Serialization overhead** — data leaves JVM → Python → back to JVM (row by row!)
+2. **No Catalyst optimization** — Spark treats UDF as a black box
+3. **GIL limitations** — Python GIL limits parallelism
+
+**Better alternatives (in preference order):**
+
+**1. Built-in functions (always prefer):**
+\`\`\`python
+from pyspark.sql.functions import lower, trim
+df.withColumn("clean", lower(trim(col("email"))))
+\`\`\`
+
+**2. Pandas UDF — 10–100x faster:**
+\`\`\`python
+from pyspark.sql.functions import pandas_udf
+import pandas as pd
+
+@pandas_udf(StringType())
+def clean_email_pandas(s: pd.Series) -> pd.Series:
+    return s.str.strip().str.lower()
+
+df.withColumn("clean", clean_email_pandas(col("email")))
+\`\`\`
+
+**Interview tip:** "I always check if a built-in function can replace a UDF. If I must use a UDF, I use Pandas UDFs with Apache Arrow for vectorized processing."`,
+    followUp: "What is Apache Arrow and how does it speed up Pandas UDFs?"
+  },
+  {
+    id: 13, category: "Delta Lake", difficulty: "Hard",
+    question: "What is Delta Lake and how does it improve on plain Parquet?",
+    answer: `**Delta Lake** is an open-source storage layer that brings ACID transactions and reliability to data lakes.
+
+**Problems with plain Parquet:**
+- No ACID transactions → partial writes, corrupt state
+- No schema enforcement → bad data silently lands
+- No deletes/updates → can't comply with GDPR
+- No time travel
+- Inconsistent reads during writes
+
+**Delta Lake solutions:**
+
+**1. ACID Transactions:**
+\`\`\`python
+df.write.format("delta").save("s3://delta/events")
+# Atomic — either fully written or not at all
+\`\`\`
+
+**2. Time Travel:**
+\`\`\`python
+spark.read.format("delta").option("versionAsOf", 5).load(path)
+spark.read.format("delta").option("timestampAsOf", "2024-01-01").load(path)
+\`\`\`
+
+**3. Upserts (MERGE):**
+\`\`\`python
+from delta.tables import DeltaTable
+delta_table = DeltaTable.forPath(spark, path)
+delta_table.alias("target").merge(
+    updates.alias("source"), "target.id = source.id"
+).whenMatchedUpdateAll().whenNotMatchedInsertAll().execute()
+\`\`\`
+
+**4. OPTIMIZE & Z-ORDER:**
+\`\`\`python
+delta_table.optimize().executeZOrderBy("user_id", "date")
+\`\`\`
+
+**Interview tip:** Delta Lake is the foundation of the Lakehouse architecture (Databricks). Know MERGE for SCD Type 2 patterns cold.`,
+    followUp: "How would you implement SCD Type 2 using Delta Lake MERGE?"
+  },
+  {
+    id: 14, category: "Streaming", difficulty: "Hard",
+    question: "How does Spark Structured Streaming work? Explain watermarking.",
+    answer: `**Structured Streaming** treats a live data stream as an unbounded table. New data = new rows, query runs continuously.
+
+\`\`\`python
+stream_df = spark.readStream \
+    .format("kafka") \
+    .option("kafka.bootstrap.servers", "broker:9092") \
+    .option("subscribe", "events").load()
+
+query = stream_df.writeStream \
+    .format("delta") \
+    .outputMode("append") \
+    .option("checkpointLocation", "s3://checkpoints/") \
+    .start()
+\`\`\`
+
+**Output Modes:**
+- append — only new rows (default, no aggregation)
+- complete — full result table each time (aggregations)
+- update — only updated rows
+
+**Watermarking — handling late data:**
+\`\`\`python
+result = stream_df \
+    .withWatermark("event_time", "10 minutes") \
+    .groupBy(
+        window(col("event_time"), "5 minutes"),
+        col("user_id")
+    ).count()
+\`\`\`
+
+**How watermark works:**
+- Spark tracks the max event_time seen
+- Watermark = max_event_time - delay_threshold
+- Events older than watermark are dropped
+- Allows Spark to clean up state for old windows
+
+**Triggers:**
+\`\`\`python
+.trigger(processingTime="30 seconds")  # Micro-batch
+.trigger(once=True)                    # Process once and stop
+\`\`\`
+
+**Interview tip:** Always mention checkpointing — it's how Structured Streaming achieves fault tolerance by persisting offsets and state.`,
+    followUp: "What is stateful streaming and when would you use mapGroupsWithState?"
+  },
+  {
+    id: 15, category: "Real-world", difficulty: "Hard",
+    question: "Walk me through how you'd debug a slow Spark job in production.",
+    answer: `**Systematic debugging approach:**
+
+**Step 1: Check Spark UI**
+- Jobs tab → identify slow stages
+- Stages tab → look at task distribution (min/median/max time)
+- Executors tab → check GC time, shuffle read/write, spill
+
+**Red flags:**
+- GC time > 10% → memory pressure
+- Shuffle spill to disk → increase executor memory or reduce shuffle partitions
+- Straggler tasks → data skew
+- Very few tasks → too few partitions
+
+**Step 2: Check the physical plan:**
+\`\`\`python
+df.explain(True)  # See physical plan + statistics
+\`\`\`
+
+**Step 3: Common fixes:**
+\`\`\`python
+# Enable AQE (Spark 3.x) — handles many issues automatically
+spark.conf.set("spark.sql.adaptive.enabled", "true")
+spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "true")
+spark.conf.set("spark.sql.adaptive.skewJoin.enabled", "true")
+
+# Tune shuffle partitions (target ~128–200MB per partition)
+spark.conf.set("spark.sql.shuffle.partitions", "400")
+\`\`\`
+
+**Step 4: Check upstream causes**
+- Data volume suddenly increased?
+- Schema change introduced new NULLs?
+- Source system throttling (JDBC)?
+
+**Real example answer:** "I had a groupBy job taking 45 minutes. Spark UI showed 2 tasks taking 40 minutes while 198 finished in < 1 min. I found a NULL user_id causing massive skew, filtered NULLs upstream, and the job dropped to 3 minutes."`,
+    followUp: "How do you monitor Spark jobs in a production environment?"
+  }
+];
+
+const CATEGORIES = ["All", ...new Set(questions.map(q => q.category))];
+const DIFFICULTIES = ["All", "Easy", "Medium", "Hard"];
+const DIFF_COLORS = {
+  Easy:   { bg: "rgba(21,87,36,0.25)",   text: "#56c27c", border: "rgba(86,194,124,0.3)" },
+  Medium: { bg: "rgba(133,100,4,0.25)",  text: "#ffc107", border: "rgba(255,193,7,0.3)" },
+  Hard:   { bg: "rgba(114,28,36,0.25)",  text: "#ff6b6b", border: "rgba(255,107,107,0.3)" },
+};
+
+function CodeBlock({ code }) {
+  return (
+    <pre style={{
+      background: "#0d1117", border: "1px solid #30363d", borderRadius: 8,
+      padding: 14, overflowX: "auto", fontSize: 13, lineHeight: 1.65,
+      margin: "10px 0", color: "#e6edf3", fontFamily: "monospace",
+    }}>{code}</pre>
+  );
+}
+
+function renderAnswer(text) {
+  const parts = text.split(/(```[\s\S]*?```|\*\*[^*]+\*\*)/g);
+  return parts.map((part, i) => {
+    if (part.startsWith("```") && part.endsWith("```")) {
+      const code = part.slice(3).replace(/^python\n/, "").slice(0, -3);
+      return React.createElement(CodeBlock, { key: i, code });
+    }
+    if (part.startsWith("**") && part.endsWith("**")) {
+      return React.createElement("strong", { key: i, style: { color: "#ff6b35", fontWeight: 700 } }, part.slice(2, -2));
+    }
+    return React.createElement("span", { key: i }, part);
+  });
+}
+
+const TIPS = [
+  { icon: "🎯", title: "STAR Method", body: "Structure behavioral answers as Situation → Task → Action → Result. Always quantify your impact." },
+  { icon: "⚡", title: "Performance First", body: "Interviewers love when you proactively mention performance tradeoffs. Don't just answer — optimize." },
+  { icon: "🔍", title: "Use Spark UI", body: "Mention the Spark UI in debugging answers. It shows you've worked with production systems." },
+  { icon: "📐", title: "Know Your Numbers", body: "Default shuffle partitions: 200. Broadcast threshold: 10MB. Target partition size: ~128–200MB." },
+  { icon: "🌊", title: "Mention AQE", body: "Adaptive Query Execution (Spark 3.x) is a silver bullet. Mention it for skew, shuffle, and join questions." },
+  { icon: "💾", title: "Delta Lake Matters", body: "Most DE roles use Delta Lake or similar. Know MERGE for upserts and SCD Type 2 patterns cold." },
+  { icon: "🧪", title: "Testing Spark", body: "Know how to unit test PySpark with pytest and chispa. Shows production maturity." },
+  { icon: "📊", title: "Data Modeling", body: "Be ready for questions on medallion architecture (Bronze/Silver/Gold) — very common in Databricks environments." },
+];
+
+const LIKELY_TOPICS = [
+  "Data skew & how you handled it","Explain a complex pipeline you built",
+  "Performance optimization you did","Broadcast vs Sort-Merge joins",
+  "Delta Lake MERGE / upserts","Structured Streaming + watermarking",
+  "Partitioning strategy decisions","Debugging a slow Spark job",
+  "Window functions (rank, row_number)","AQE and Spark 3.x features",
+];
+
+function App() {
+  const [cat, setCat] = useState("All");
+  const [diff, setDiff] = useState("All");
+  const [search, setSearch] = useState("");
+  const [openId, setOpenId] = useState(null);
+  const [studied, setStudied] = useState(new Set());
+  const [tab, setTab] = useState("questions");
+
+  const filtered = questions.filter(q =>
+    (cat === "All" || q.category === cat) &&
+    (diff === "All" || q.difficulty === diff) &&
+    (q.question.toLowerCase().includes(search.toLowerCase()) || q.category.toLowerCase().includes(search.toLowerCase()))
+  );
+
+  const toggleStudied = (id) => {
+    setStudied(prev => {
+      const n = new Set(prev);
+      n.has(id) ? n.delete(id) : n.add(id);
+      return n;
+    });
+  };
+
+  const progress = Math.round((studied.size / questions.length) * 100);
+
+  return (
+    <div style={{ minHeight: "100vh" }}>
+      {/* HEADER */}
+      <div style={{
+        background: "rgba(255,255,255,0.04)", backdropFilter: "blur(20px)",
+        borderBottom: "1px solid rgba(255,255,255,0.08)",
+        padding: "24px 28px", position: "sticky", top: 0, zIndex: 100
+      }}>
+        <div style={{ maxWidth: 1100, margin: "0 auto" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 16 }}>
+            <div>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
+                <span style={{ fontSize: 26 }}>⚡</span>
+                <h1 style={{
+                  margin: 0, fontSize: 24, fontWeight: 800, letterSpacing: "-0.5px",
+                  background: "linear-gradient(90deg,#ff6b35,#f7c59f)",
+                  WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent"
+                }}>PySpark Interview Prep</h1>
+              </div>
+              <p style={{ margin: 0, color: "rgba(255,255,255,0.45)", fontSize: 13 }}>
+                3 YOE · Data Engineering · 15 curated questions
+              </p>
+            </div>
+            <div style={{
+              background: "rgba(255,107,53,0.1)", border: "1px solid rgba(255,107,53,0.3)",
+              borderRadius: 12, padding: "10px 18px", textAlign: "center"
+            }}>
+              <div style={{ fontSize: 20, fontWeight: 800, color: "#ff6b35" }}>{progress}%</div>
+              <div style={{ fontSize: 10, color: "rgba(255,255,255,0.45)", letterSpacing: 1 }}>STUDIED</div>
+              <div style={{ marginTop: 5, height: 3, width: 110, background: "rgba(255,255,255,0.1)", borderRadius: 2, overflow: "hidden" }}>
+                <div style={{ height: "100%", width: `${progress}%`, background: "linear-gradient(90deg,#ff6b35,#f7c59f)", borderRadius: 2, transition: "width 0.5s" }} />
+              </div>
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 4, marginTop: 18 }}>
+            {["questions","tips"].map(t => (
+              <button key={t} onClick={() => setTab(t)} style={{
+                padding: "7px 18px", borderRadius: 7, border: "none", cursor: "pointer",
+                fontWeight: 600, fontSize: 13, transition: "all 0.2s",
+                background: tab === t ? "#ff6b35" : "rgba(255,255,255,0.07)",
+                color: tab === t ? "#fff" : "rgba(255,255,255,0.55)"
+              }}>
+                {t === "questions" ? "📋 Questions" : "💡 Interview Tips"}
+              </button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ maxWidth: 1100, margin: "0 auto", padding: "28px 20px" }}>
+
+        {tab === "tips" ? (
+          <div>
+            <h2 style={{ fontWeight: 800, fontSize: 19, marginBottom: 20, color: "#f7c59f" }}>
+              💡 Interview Strategy for 3 YOE Data Engineers
+            </h2>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(280px,1fr))", gap: 14 }}>
+              {TIPS.map((tip, i) => (
+                <div key={i} style={{
+                  background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)",
+                  borderRadius: 13, padding: "18px 20px"
+                }}>
+                  <div style={{ fontSize: 26, marginBottom: 8 }}>{tip.icon}</div>
+                  <div style={{ fontWeight: 700, fontSize: 14, color: "#ff6b35", marginBottom: 6 }}>{tip.title}</div>
+                  <div style={{ fontSize: 13.5, color: "rgba(255,255,255,0.62)", lineHeight: 1.6 }}>{tip.body}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{ marginTop: 28, background: "rgba(255,107,53,0.07)", border: "1px solid rgba(255,107,53,0.22)", borderRadius: 13, padding: 22 }}>
+              <h3 style={{ fontWeight: 800, color: "#ff6b35", marginBottom: 14, fontSize: 16 }}>🎯 Most Likely Topics for Your Level</h3>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, fontSize: 13.5 }}>
+                {LIKELY_TOPICS.map((t, i) => (
+                  <div key={i} style={{ display: "flex", gap: 7, color: "rgba(255,255,255,0.72)", padding: "3px 0" }}>
+                    <span style={{ color: "#ff6b35" }}>▸</span>{t}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+
+        ) : (
+          <>
+            {/* FILTERS */}
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginBottom: 20, alignItems: "center" }}>
+              <input
+                placeholder="🔍 Search questions..."
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                style={{
+                  padding: "8px 14px", borderRadius: 9,
+                  border: "1px solid rgba(255,255,255,0.12)",
+                  background: "rgba(255,255,255,0.06)",
+                  color: "#e8e8f0", fontSize: 14, outline: "none", minWidth: 200
+                }}
+              />
+              <div style={{ display: "flex", gap: 5, flexWrap: "wrap" }}>
+                {CATEGORIES.map(c => (
+                  <button key={c} onClick={() => setCat(c)} style={{
+                    padding: "6px 12px", borderRadius: 7, cursor: "pointer", fontSize: 12.5, fontWeight: 600,
+                    border: `1px solid ${cat === c ? "#ff6b35" : "rgba(255,255,255,0.13)"}`,
+                    background: cat === c ? "rgba(255,107,53,0.18)" : "transparent",
+                    color: cat === c ? "#ff6b35" : "rgba(255,255,255,0.55)"
+                  }}>{c}</button>
+                ))}
+              </div>
+              <div style={{ display: "flex", gap: 5 }}>
+                {DIFFICULTIES.map(d => {
+                  const dc = DIFF_COLORS[d];
+                  return (
+                    <button key={d} onClick={() => setDiff(d)} style={{
+                      padding: "6px 12px", borderRadius: 7, cursor: "pointer", fontSize: 12.5, fontWeight: 600,
+                      border: `1px solid ${diff === d ? (dc?.border || "#ff6b35") : "rgba(255,255,255,0.13)"}`,
+                      background: diff === d ? (dc?.bg || "rgba(255,107,53,0.18)") : "transparent",
+                      color: diff === d ? (dc?.text || "#ff6b35") : "rgba(255,255,255,0.55)"
+                    }}>{d}</button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div style={{ fontSize: 12.5, color: "rgba(255,255,255,0.3)", marginBottom: 16 }}>
+              Showing {filtered.length} of {questions.length} questions · {studied.size} studied
+            </div>
+
+            {/* QUESTIONS */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              {filtered.map(q => {
+                const isOpen = openId === q.id;
+                const isStudied = studied.has(q.id);
+                const dc = DIFF_COLORS[q.difficulty];
+                return (
+                  <div key={q.id} style={{
+                    background: isStudied ? "rgba(21,87,36,0.12)" : "rgba(255,255,255,0.04)",
+                    border: `1px solid ${isStudied ? "rgba(86,194,124,0.3)" : isOpen ? "rgba(255,107,53,0.35)" : "rgba(255,255,255,0.08)"}`,
+                    borderRadius: 13, overflow: "hidden", transition: "border-color 0.2s"
+                  }}>
+                    <div onClick={() => setOpenId(isOpen ? null : q.id)} style={{
+                      display: "flex", alignItems: "flex-start", gap: 13,
+                      padding: "16px 18px", cursor: "pointer", userSelect: "none"
+                    }}>
+                      <div style={{
+                        width: 26, height: 26, borderRadius: "50%", flexShrink: 0, marginTop: 2,
+                        background: isOpen ? "#ff6b35" : "rgba(255,255,255,0.08)",
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                        fontSize: 12, fontWeight: 700,
+                        color: isOpen ? "#fff" : "rgba(255,255,255,0.45)", transition: "background 0.2s"
+                      }}>{q.id}</div>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ display: "flex", gap: 7, marginBottom: 6, flexWrap: "wrap" }}>
+                          <span style={{
+                            fontSize: 10, fontWeight: 700, padding: "2px 9px", borderRadius: 20,
+                            background: "rgba(255,107,53,0.14)", color: "#ff6b35",
+                            letterSpacing: "0.5px", textTransform: "uppercase"
+                          }}>{q.category}</span>
+                          <span style={{
+                            fontSize: 10, fontWeight: 700, padding: "2px 9px", borderRadius: 20,
+                            background: dc.bg, color: dc.text, border: `1px solid ${dc.border}`,
+                            letterSpacing: "0.5px", textTransform: "uppercase"
+                          }}>{q.difficulty}</span>
+                          {isStudied && <span style={{
+                            fontSize: 10, fontWeight: 700, padding: "2px 9px", borderRadius: 20,
+                            background: "rgba(86,194,124,0.15)", color: "#56c27c"
+                          }}>✓ STUDIED</span>}
+                        </div>
+                        <div style={{ fontWeight: 600, fontSize: 15, lineHeight: 1.5, color: "#e8e8f0" }}>{q.question}</div>
+                      </div>
+                      <div style={{ fontSize: 16, color: "rgba(255,255,255,0.3)", transition: "transform 0.25s", transform: isOpen ? "rotate(180deg)" : "none" }}>↓</div>
+                    </div>
+
+                    {isOpen && (
+                      <div style={{ padding: "0 18px 18px", borderTop: "1px solid rgba(255,255,255,0.06)", paddingTop: 18 }}>
+                        <div style={{ fontSize: 14, lineHeight: 1.8, color: "rgba(255,255,255,0.82)", whiteSpace: "pre-wrap" }}>
+                          {renderAnswer(q.answer)}
+                        </div>
+                        <div style={{
+                          marginTop: 18, padding: "12px 16px",
+                          background: "rgba(247,197,159,0.06)", borderLeft: "3px solid #f7c59f",
+                          borderRadius: "0 9px 9px 0"
+                        }}>
+                          <div style={{ fontSize: 11, fontWeight: 700, color: "#f7c59f", letterSpacing: "0.5px", marginBottom: 5 }}>💬 LIKELY FOLLOW-UP</div>
+                          <div style={{ fontSize: 13.5, color: "rgba(255,255,255,0.68)" }}>{q.followUp}</div>
+                        </div>
+                        <div style={{ marginTop: 14, display: "flex", justifyContent: "flex-end" }}>
+                          <button onClick={() => toggleStudied(q.id)} style={{
+                            padding: "7px 16px", borderRadius: 7, cursor: "pointer", fontSize: 13, fontWeight: 600,
+                            border: `1px solid ${isStudied ? "rgba(86,194,124,0.4)" : "rgba(255,255,255,0.14)"}`,
+                            background: isStudied ? "rgba(86,194,124,0.13)" : "rgba(255,255,255,0.05)",
+                            color: isStudied ? "#56c27c" : "rgba(255,255,255,0.5)", transition: "all 0.2s"
+                          }}>
+                            {isStudied ? "✓ Mark as Unread" : "Mark as Studied"}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
+</script>
+</body>
+</html>
